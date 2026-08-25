@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: #030712;
+    color: #f1f5f9;
+    font-family: 'Inter', system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(34, 211, 238, 0.1);
+  }
+  .glass-light {
+    background: rgba(30, 41, 59, 0.5);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .glow-cyan {
+    box-shadow: 0 0 24px rgba(34, 211, 238, 0.25), 0 0 48px rgba(34, 211, 238, 0.1);
+  }
+  .glow-cyan-sm {
+    box-shadow: 0 0 12px rgba(34, 211, 238, 0.3);
+  }
+  .text-gradient {
+    background: linear-gradient(135deg, #22D3EE, #818CF8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(34, 211, 238, 0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34, 211, 238, 0.04) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  .sidebar-link {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 1rem;
+    border-radius: 0.75rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #94a3b8;
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+  .sidebar-link:hover {
+    background: rgba(34, 211, 238, 0.08);
+    color: #22D3EE;
+  }
+  .sidebar-link.active {
+    background: rgba(34, 211, 238, 0.12);
+    color: #22D3EE;
+    border: 1px solid rgba(34, 211, 238, 0.2);
+  }
+  .input-field {
+    width: 100%;
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    font-size: 0.875rem;
+    color: #e2e8f0;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-field::placeholder { color: #475569; }
+  .input-field:focus { border-color: rgba(34, 211, 238, 0.5); }
+  .card {
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(34, 211, 238, 0.1);
+    border-radius: 16px;
+  }
+  .card-hover {
+    transition: all 0.25s ease;
+  }
+  .card-hover:hover {
+    border-color: rgba(34, 211, 238, 0.25);
+    box-shadow: 0 8px 32px rgba(34, 211, 238, 0.1);
+    transform: translateY(-2px);
+  }
+}
