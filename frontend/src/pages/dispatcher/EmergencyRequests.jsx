@@ -1,180 +1,606 @@
-import { useState, useEffect } from 'react'
+
+import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { FiFilter } from 'react-icons/fi'
+import {
+  FiRefreshCw,
+  FiMapPin,
+  FiTruck,
+  FiUser,
+  FiActivity,
+  FiCheckCircle,
+  FiClock,
+  FiAlertCircle,
+  FiExternalLink
+} from 'react-icons/fi'
+import toast from 'react-hot-toast'
+
 import { emergencyService } from '../../services/emergencyService'
 import { ambulanceService } from '../../services/ambulanceService'
 import { hospitalService } from '../../services/hospitalService'
-import { StatusBadge, SeverityBadge } from '../../components/ui/SeverityBadge'
-import Modal from '../../components/ui/Modal'
+
 import Button from '../../components/ui/Button'
 import Loader from '../../components/common/Loader'
-import { useSocket } from '../../context/SocketContext'
-import toast from 'react-hot-toast'
+
+const STATUS_OPTIONS = {
+  pending: ['dispatched', 'cancelled'],
+  dispatched: ['en_route', 'arrived', 'resolved', 'cancelled'],
+  en_route: ['arrived', 'resolved', 'cancelled'],
+  arrived: ['resolved', 'cancelled']
+}
+
+const STATUS_LABELS = {
+  pending: 'Pending',
+  dispatched: 'Dispatched',
+  en_route: 'En Route',
+  arrived: 'Arrived',
+  resolved: 'Resolved',
+  cancelled: 'Cancelled'
+}
+
+const SEVERITY_COLORS = {
+  low: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10',
+  medium: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10',
+  high: 'text-orange-400 border-orange-500/30 bg-orange-500/10',
+  critical: 'text-red-400 border-red-500/30 bg-red-500/10'
+}
+
+const STATUS_COLORS = {
+  pending: 'text-yellow-400',
+  dispatched: 'text-cyan-400',
+  en_route: 'text-blue-400',
+  arrived: 'text-purple-400',
+  resolved: 'text-emerald-400',
+  cancelled: 'text-slate-400'
+}
+
+function getData(response) {
+  const body = response?.data
+  return body?.data ?? body
+}
+
+function getId(value) {
+  return value?._id ?? value ?? ''
+}
+
+function formatDate(date) {
+  if (!date) return '—'
+
+  const parsed = new Date(date)
+
+  return Number.isNaN(parsed.getTime())
+    ? '—'
+    : parsed.toLocaleString()
+}
 
 export default function EmergencyRequests() {
   const [emergencies, setEmergencies] = useState([])
   const [ambulances, setAmbulances] = useState([])
   const [hospitals, setHospitals] = useState([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState('all')
+  const [refreshing, setRefreshing] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [selected, setSelected] = useState(null)
-  const [dispatchForm, setDispatchForm] = useState({ ambulanceId: '', hospitalId: '' })
-  const [dispatching, setDispatching] = useState(false)
-  const socket = useSocket()
+  const [dispatchForm, setDispatchForm] = useState({
+    ambulanceId: '',
+    driverId: '',
+    hospitalId: ''
+  })
 
-  const loadData = () => Promise.all([
-    emergencyService.getAll(),
-    ambulanceService.getAvailable(),
-    hospitalService.getAll()
-  ]).then(([e, a, h]) => {
-    setEmergencies(e.data.data)
-    setAmbulances(a.data.data)
-    setHospitals(h.data.data)
-  }).catch(() => toast.error('Failed to load'))
-    .finally(() => setLoading(false))
+  const loadData = useCallback(async (showLoader = true) => {
+    if (showLoader) setLoading(true)
+    else setRefreshing(true)
 
-  useEffect(() => { loadData() }, [])
+    try {
+      const [emergencyResponse, ambulanceResponse, hospitalResponse] =
+        await Promise.all([
+          emergencyService.getAll(),
+          ambulanceService.getAvailable(),
+          hospitalService.getAll()
+        ])
+
+      const emergencyData = getData(emergencyResponse)
+      const ambulanceData = getData(ambulanceResponse)
+      const hospitalData = getData(hospitalResponse)
+
+      setEmergencies(Array.isArray(emergencyData) ? emergencyData : [])
+      setAmbulances(Array.isArray(ambulanceData) ? ambulanceData : [])
+      setHospitals(Array.isArray(hospitalData) ? hospitalData : [])
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || 'Unable to load emergency data'
+      )
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
 
   useEffect(() => {
-    if (!socket) return
-    socket.on('new_emergency', e => setEmergencies(prev => [e, ...prev]))
-    socket.on('emergency_updated', e => setEmergencies(prev => prev.map(x => x._id === e._id ? e : x)))
-    return () => { socket.off('new_emergency'); socket.off('emergency_updated') }
-  }, [socket])
+    loadData()
 
-  const handleDispatch = async () => {
-    if (!dispatchForm.ambulanceId) { toast.error('Select an ambulance'); return }
-    setDispatching(true)
+    let socket
+
     try {
-      await emergencyService.dispatch(selected._id, dispatchForm)
-      toast.success('Emergency dispatched!')
+      // Use the existing socket client if this project exports one.
+      // Polling below remains the fallback.
+      const socketModule = require('../../services/socket')
+      socket = socketModule.default || socketModule.socket
+
+      if (socket?.on) {
+        const refresh = () => loadData(false)
+
+        socket.on('new_emergency', refresh)
+        socket.on('emergency_updated', refresh)
+        socket.on('ambulance_location', refresh)
+
+        socket.__kavachEmergencyRefresh = refresh
+      }
+    } catch {
+      // Socket module may have a different name or export.
+    }
+
+    const interval = window.setInterval(() => loadData(false), 15000)
+
+    return () => {
+      window.clearInterval(interval)
+
+      if (socket?.__kavachEmergencyRefresh) {
+        socket.off?.('new_emergency', socket.__kavachEmergencyRefresh)
+        socket.off?.('emergency_updated', socket.__kavachEmergencyRefresh)
+        socket.off?.('ambulance_location', socket.__kavachEmergencyRefresh)
+        delete socket.__kavachEmergencyRefresh
+      }
+    }
+  }, [loadData])
+
+  const updateForm = (key, value) => {
+    setDispatchForm(previous => {
+      const next = { ...previous, [key]: value }
+
+      if (key === 'ambulanceId') {
+        const ambulance = ambulances.find(
+          item => String(item._id) === String(value)
+        )
+
+        next.driverId = getId(ambulance?.driver)
+      }
+
+      return next
+    })
+  }
+
+  const openDispatch = emergency => {
+    setSelected(emergency)
+
+    setDispatchForm({
+      ambulanceId: '',
+      driverId: '',
+      hospitalId: getId(emergency.assignedHospital)
+    })
+  }
+
+  const handleDispatch = async event => {
+    event.preventDefault()
+
+    if (!selected) return
+
+    if (!dispatchForm.ambulanceId) {
+      toast.error('Please select an available ambulance')
+      return
+    }
+
+    setSubmitting(true)
+
+    try {
+      await emergencyService.dispatch(selected._id, {
+        ambulanceId: dispatchForm.ambulanceId,
+        driverId: dispatchForm.driverId || undefined,
+        hospitalId: dispatchForm.hospitalId || undefined
+      })
+
+      toast.success('Ambulance dispatched successfully')
       setSelected(null)
-      loadData()
-    } catch (err) {
-      toast.error(err.response?.data?.message || 'Dispatch failed')
-    } finally { setDispatching(false) }
+      await loadData(false)
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || 'Unable to dispatch ambulance'
+      )
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  const handleStatusUpdate = async (id, status) => {
+  const handleStatusUpdate = async (emergency, status) => {
     try {
-      await emergencyService.updateStatus(id, status)
-      setEmergencies(prev => prev.map(e => e._id === id ? { ...e, status } : e))
-      toast.success('Status updated')
-    } catch { toast.error('Update failed') }
+      await emergencyService.updateStatus(emergency._id, status)
+
+      toast.success(`Status updated to ${STATUS_LABELS[status]}`)
+      await loadData(false)
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || 'Unable to update status'
+      )
+    }
   }
 
-  const filtered = filter === 'all' ? emergencies : emergencies.filter(e => e.status === filter)
+  const inputClass =
+    'w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-3 text-sm text-white outline-none focus:border-cyan-400'
 
-  if (loading) return <Loader />
+  if (loading) {
+    return (
+      <div className="flex min-h-64 items-center justify-center">
+        <Loader />
+      </div>
+    )
+  }
+
+  const activeCount = emergencies.filter(
+    emergency =>
+      !['resolved', 'cancelled'].includes(emergency.status)
+  ).length
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-black text-white">Emergency Requests</h1>
-          <p className="text-slate-400 text-sm mt-1">{emergencies.length} total emergencies</p>
+          <h1 className="text-2xl font-black text-white">
+            Emergency Requests
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Monitor emergencies and coordinate ambulance dispatch.
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <FiFilter className="text-slate-400" />
-          {['all', 'pending', 'dispatched', 'en_route', 'resolved'].map(f => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${filter === f ? 'bg-cyan-400/20 text-cyan-400 border border-cyan-400/30' : 'text-slate-400 hover:text-slate-300'}`}>
-              {f.replace('_', ' ')}
-            </button>
-          ))}
-        </div>
+
+        <Button
+          type="button"
+          variant="secondary"
+          loading={refreshing}
+          onClick={() => loadData(false)}
+        >
+          <FiRefreshCw className="mr-2" />
+          Refresh
+        </Button>
       </div>
 
-      <div className="glass rounded-2xl overflow-hidden">
-        {filtered.length === 0
-          ? <div className="p-12 text-center text-slate-500">No emergencies found.</div>
-          : <div className="divide-y divide-slate-700/30">
-            {filtered.map(e => (
-              <motion.div key={e._id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                className="px-6 py-4 hover:bg-slate-700/10 transition-colors">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-white font-bold text-sm capitalize">{e.type?.replace('_', ' ')}</span>
-                      <SeverityBadge severity={e.severity} />
-                      <StatusBadge status={e.status} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <SummaryCard
+          icon={<FiAlertCircle />}
+          label="Total Requests"
+          value={emergencies.length}
+        />
+        <SummaryCard
+          icon={<FiActivity />}
+          label="Active Emergencies"
+          value={activeCount}
+        />
+        <SummaryCard
+          icon={<FiTruck />}
+          label="Available Ambulances"
+          value={ambulances.length}
+        />
+      </div>
+
+      {emergencies.length === 0 ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-10 text-center">
+          <FiCheckCircle className="mx-auto mb-3 text-4xl text-emerald-400" />
+          <h2 className="text-lg font-bold text-white">
+            No emergency requests
+          </h2>
+          <p className="mt-2 text-sm text-slate-400">
+            New emergency requests will appear here.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {emergencies.map(emergency => {
+            const status = emergency.status || 'pending'
+            const allowedStatuses = STATUS_OPTIONS[status] || []
+
+            const coordinates = emergency.location?.coordinates
+            const validCoordinates =
+              Array.isArray(coordinates) &&
+              coordinates.length === 2 &&
+              Number.isFinite(Number(coordinates[0])) &&
+              Number.isFinite(Number(coordinates[1]))
+
+            const mapUrl = validCoordinates
+              ? `https://www.google.com/maps?q=${coordinates[1]},${coordinates[0]}`
+              : ''
+
+            return (
+              <motion.article
+                key={emergency._id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-lg font-bold capitalize text-white">
+                        {(emergency.type || 'other').replaceAll('_', ' ')}
+                      </h2>
+
+                      <span
+                        className={`rounded-lg border px-2 py-1 text-xs font-bold capitalize ${
+                          SEVERITY_COLORS[emergency.severity] ||
+                          SEVERITY_COLORS.high
+                        }`}
+                      >
+                        {emergency.severity || 'high'}
+                      </span>
                     </div>
-                    <div className="text-slate-400 text-xs mb-0.5">{e.location?.address || 'Location recorded'}</div>
-                    <div className="text-slate-500 text-xs">
-                      Citizen: {e.citizen?.name} · {e.citizen?.phone}
-                      {e.assignedAmbulance && ` · Unit: ${e.assignedAmbulance.vehicleNumber}`}
-                      {e.assignedHospital && ` · Hospital: ${e.assignedHospital.name}`}
-                    </div>
-                    <div className="text-slate-600 text-xs mt-0.5">{new Date(e.createdAt).toLocaleString()}</div>
+
+                    <p className="mt-2 text-xs text-slate-500">
+                      Request ID: {emergency._id}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      <FiClock className="mr-1 inline" />
+                      {formatDate(emergency.createdAt)}
+                    </p>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {e.status === 'pending' && (
-                      <Button size="sm" onClick={() => { setSelected(e); setDispatchForm({ ambulanceId: '', hospitalId: '' }) }}>
-                        Dispatch
-                      </Button>
-                    )}
-                    {e.status === 'dispatched' && (
-                      <Button size="sm" variant="secondary" onClick={() => handleStatusUpdate(e._id, 'en_route')}>
-                        Mark En Route
-                      </Button>
-                    )}
-                    {e.status === 'en_route' && (
-                      <Button size="sm" variant="success" onClick={() => handleStatusUpdate(e._id, 'resolved')}>
-                        Resolve
-                      </Button>
-                    )}
-                  </div>
+
+                  <span
+                    className={`rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold ${
+                      STATUS_COLORS[status] || 'text-white'
+                    }`}
+                  >
+                    {STATUS_LABELS[status] || status}
+                  </span>
                 </div>
-              </motion.div>
-            ))}
-          </div>}
+
+                <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <InfoRow
+                    icon={<FiUser />}
+                    label="Citizen"
+                    value={
+                      emergency.citizen?.name ||
+                      'Citizen information unavailable'
+                    }
+                  />
+
+                  <InfoRow
+                    icon={<FiMapPin />}
+                    label="Address"
+                    value={
+                      emergency.location?.address ||
+                      'Address not provided'
+                    }
+                  />
+
+                  <InfoRow
+                    icon={<FiTruck />}
+                    label="Assigned Ambulance"
+                    value={
+                      emergency.assignedAmbulance?.vehicleNumber ||
+                      'Not assigned'
+                    }
+                  />
+
+                  <InfoRow
+                    icon={<FiUser />}
+                    label="Assigned Driver"
+                    value={
+                      emergency.assignedDriver?.name ||
+                      'Not assigned'
+                    }
+                  />
+
+                  <InfoRow
+                    icon={<FiActivity />}
+                    label="Hospital"
+                    value={
+                      emergency.assignedHospital?.name ||
+                      'Not assigned'
+                    }
+                  />
+                </div>
+
+                {emergency.description && (
+                  <p className="mt-4 rounded-xl bg-slate-950/70 p-3 text-sm text-slate-300">
+                    {emergency.description}
+                  </p>
+                )}
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {mapUrl && (
+                    <a
+                      href={mapUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-cyan-400 hover:bg-slate-800"
+                    >
+                      <FiMapPin />
+                      View Location
+                      <FiExternalLink />
+                    </a>
+                  )}
+
+                  {status === 'pending' && (
+                    <Button
+                      type="button"
+                      onClick={() => openDispatch(emergency)}
+                    >
+                      <FiTruck className="mr-2" />
+                      Dispatch Ambulance
+                    </Button>
+                  )}
+
+                  {allowedStatuses.map(nextStatus => {
+                    if (nextStatus === 'dispatched') return null
+
+                    return (
+                      <button
+                        key={nextStatus}
+                        type="button"
+                        onClick={() =>
+                          handleStatusUpdate(emergency, nextStatus)
+                        }
+                        className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-cyan-500 hover:bg-slate-800"
+                      >
+                        Mark {STATUS_LABELS[nextStatus]}
+                      </button>
+                    )
+                  })}
+                </div>
+              </motion.article>
+            )
+          })}
+        </div>
+      )}
+
+      {selected && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/70 p-4"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget && !submitting) {
+              setSelected(null)
+            }
+          }}
+        >
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="my-auto w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-950 p-6"
+          >
+            <h2 className="text-xl font-black text-white">
+              Dispatch Ambulance
+            </h2>
+
+            <p className="mt-1 text-sm text-slate-400">
+              Select the ambulance and destination hospital.
+            </p>
+
+            <form onSubmit={handleDispatch} className="mt-5 space-y-4">
+              <div>
+                <label className="mb-2 block text-sm text-slate-300">
+                  Available Ambulance *
+                </label>
+
+                <select
+                  required
+                  value={dispatchForm.ambulanceId}
+                  onChange={event =>
+                    updateForm('ambulanceId', event.target.value)
+                  }
+                  className={inputClass}
+                >
+                  <option value="">Select ambulance</option>
+
+                  {ambulances.map(ambulance => (
+                    <option key={ambulance._id} value={ambulance._id}>
+                      {ambulance.vehicleNumber}
+                      {ambulance.driver?.name
+                        ? ` — ${ambulance.driver.name}`
+                        : ''}
+                    </option>
+                  ))}
+                </select>
+
+                {ambulances.length === 0 && (
+                  <p className="mt-2 text-xs text-yellow-400">
+                    No available ambulances. Add or release an ambulance first.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm text-slate-300">
+                  Assigned Driver
+                </label>
+
+                <input
+                  readOnly
+                  value={
+                    ambulances.find(
+                      ambulance =>
+                        String(ambulance._id) ===
+                        String(dispatchForm.ambulanceId)
+                    )?.driver?.name || 'No driver assigned to this ambulance'
+                  }
+                  className={`${inputClass} opacity-80`}
+                />
+
+                <p className="mt-1 text-xs text-slate-500">
+                  The driver assigned to the selected ambulance will be used.
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm text-slate-300">
+                  Destination Hospital
+                </label>
+
+                <select
+                  value={dispatchForm.hospitalId}
+                  onChange={event =>
+                    updateForm('hospitalId', event.target.value)
+                  }
+                  className={inputClass}
+                >
+                  <option value="">Select hospital (optional)</option>
+
+                  {hospitals.map(hospital => (
+                    <option key={hospital._id} value={hospital._id}>
+                      {hospital.name}
+                      {hospital.address ? ` — ${hospital.address}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setSelected(null)}
+                  className="flex-1"
+                  disabled={submitting}
+                >
+                  Cancel
+                </Button>
+
+                <Button
+                  type="submit"
+                  loading={submitting}
+                  disabled={
+                    submitting ||
+                    !dispatchForm.ambulanceId ||
+                    ambulances.length === 0
+                  }
+                  className="flex-1"
+                >
+                  Confirm Dispatch
+                </Button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SummaryCard({ icon, label, value }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-400">{label}</p>
+        <span className="text-xl text-cyan-400">{icon}</span>
       </div>
+      <p className="mt-3 text-3xl font-black text-white">{value}</p>
+    </div>
+  )
+}
 
-      {/* Dispatch Modal */}
-      <Modal isOpen={!!selected} onClose={() => setSelected(null)} title="Dispatch Emergency">
-        {selected && (
-          <div className="space-y-4">
-            <div className="glass-light rounded-xl p-4">
-              <div className="text-white font-semibold capitalize mb-1">{selected.type?.replace('_', ' ')}</div>
-              <div className="text-slate-400 text-sm">{selected.location?.address}</div>
-              <div className="text-slate-500 text-xs mt-1">{selected.citizen?.name} · {selected.citizen?.phone}</div>
-            </div>
-
-            <div>
-              <label className="text-sm text-slate-400 mb-2 block">Select Ambulance *</label>
-              <select value={dispatchForm.ambulanceId}
-                onChange={e => setDispatchForm(f => ({ ...f, ambulanceId: e.target.value }))}
-                className="w-full glass-light rounded-xl px-4 py-3 text-sm text-slate-200 outline-none bg-transparent">
-                <option value="" className="bg-slate-800">-- Select ambulance --</option>
-                {ambulances.map(a => (
-                  <option key={a._id} value={a._id} className="bg-slate-800">
-                    {a.vehicleNumber} {a.driver ? `· ${a.driver.name}` : '· No driver'}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="text-sm text-slate-400 mb-2 block">Assign Hospital</label>
-              <select value={dispatchForm.hospitalId}
-                onChange={e => setDispatchForm(f => ({ ...f, hospitalId: e.target.value }))}
-                className="w-full glass-light rounded-xl px-4 py-3 text-sm text-slate-200 outline-none bg-transparent">
-                <option value="" className="bg-slate-800">-- Select hospital --</option>
-                {hospitals.map(h => (
-                  <option key={h._id} value={h._id} className="bg-slate-800">
-                    {h.name} · {h.availableBeds} beds
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex gap-3 pt-2">
-              <Button variant="secondary" onClick={() => setSelected(null)} className="flex-1">Cancel</Button>
-              <Button loading={dispatching} onClick={handleDispatch} className="flex-1">Confirm Dispatch</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+function InfoRow({ icon, label, value }) {
+  return (
+    <div className="flex min-w-0 items-start gap-3 rounded-xl bg-slate-950/50 p-3">
+      <span className="mt-0.5 text-cyan-400">{icon}</span>
+      <div className="min-w-0">
+        <p className="text-xs text-slate-500">{label}</p>
+        <p className="break-words text-sm text-slate-200">{value}</p>
+      </div>
     </div>
   )
 }

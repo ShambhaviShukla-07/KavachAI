@@ -1,139 +1,487 @@
-import { useState, useEffect } from 'react'
+
+import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { FiMapPin, FiRefreshCw } from 'react-icons/fi'
+import {
+  FiMapPin,
+  FiTruck,
+  FiRefreshCw,
+  FiExternalLink,
+  FiActivity,
+  FiAlertTriangle,
+  FiClock
+} from 'react-icons/fi'
+import toast from 'react-hot-toast'
+
 import { emergencyService } from '../../services/emergencyService'
 import { ambulanceService } from '../../services/ambulanceService'
-import { StatusBadge, SeverityBadge } from '../../components/ui/SeverityBadge'
-import { useSocket } from '../../context/SocketContext'
-import toast from 'react-hot-toast'
+
+function extractData(response) {
+  const body = response?.data
+  return body?.data ?? body
+}
+
+function getCoordinates(location) {
+  const coordinates = location?.coordinates
+
+  if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+    return null
+  }
+
+  const longitude = Number(coordinates[0])
+  const latitude = Number(coordinates[1])
+
+  if (
+    !Number.isFinite(longitude) ||
+    !Number.isFinite(latitude) ||
+    longitude < -180 ||
+    longitude > 180 ||
+    latitude < -90 ||
+    latitude > 90
+  ) {
+    return null
+  }
+
+  return { longitude, latitude }
+}
+
+function mapsUrl(location) {
+  const coordinates = getCoordinates(location)
+
+  if (!coordinates) return null
+
+  return `https://www.google.com/maps?q=${coordinates.latitude},${coordinates.longitude}`
+}
+
+function formatTime(value) {
+  if (!value) return 'Location time unavailable'
+
+  const date = new Date(value)
+
+  return Number.isNaN(date.getTime())
+    ? 'Location time unavailable'
+    : date.toLocaleString()
+}
+
+function statusClass(status) {
+  const classes = {
+    pending: 'text-yellow-400',
+    dispatched: 'text-cyan-400',
+    en_route: 'text-blue-400',
+    arrived: 'text-purple-400',
+    resolved: 'text-emerald-400',
+    cancelled: 'text-slate-400',
+    available: 'text-emerald-400',
+    at_scene: 'text-purple-400',
+    returning: 'text-yellow-400',
+    maintenance: 'text-red-400'
+  }
+
+  return classes[status] || 'text-slate-300'
+}
 
 export default function LiveTracking() {
   const [emergencies, setEmergencies] = useState([])
   const [ambulances, setAmbulances] = useState([])
-  const [loading, setLoading] = useState(false)
-  const socket = useSocket()
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [filter, setFilter] = useState('all')
 
-  const loadData = () => {
-    setLoading(true)
-    Promise.all([emergencyService.getAll(), ambulanceService.getAll()])
-      .then(([e, a]) => { setEmergencies(e.data.data); setAmbulances(a.data.data) })
-      .catch(() => toast.error('Failed to load'))
-      .finally(() => setLoading(false))
+  const loadTrackingData = useCallback(async (showLoader = false) => {
+    if (showLoader) setLoading(true)
+    else setRefreshing(true)
+
+    try {
+      const [emergencyResponse, ambulanceResponse] = await Promise.all([
+        emergencyService.getAll(),
+        ambulanceService.getAll()
+      ])
+
+      const emergencyData = extractData(emergencyResponse)
+      const ambulanceData = extractData(ambulanceResponse)
+
+      setEmergencies(Array.isArray(emergencyData) ? emergencyData : [])
+      setAmbulances(Array.isArray(ambulanceData) ? ambulanceData : [])
+      setLastUpdated(new Date())
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message ||
+          'Unable to load tracking information'
+      )
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  // Refresh automatically every 15 seconds. No socket file is required.
+  useEffect(() => {
+    loadTrackingData(true)
+
+    const interval = window.setInterval(() => {
+      loadTrackingData(false)
+    }, 15000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [loadTrackingData])
+
+  const activeEmergencies = emergencies.filter(
+    emergency => !['resolved', 'cancelled'].includes(emergency.status)
+  )
+
+  const filteredEmergencies =
+    filter === 'active'
+      ? activeEmergencies
+      : filter === 'resolved'
+        ? emergencies.filter(emergency => emergency.status === 'resolved')
+        : emergencies
+
+  const locatedAmbulances = ambulances.filter(
+    ambulance => getCoordinates(ambulance.location)
+  )
+
+  const locatedEmergencies = emergencies.filter(
+    emergency => getCoordinates(emergency.location)
+  )
+
+  if (loading) {
+    return (
+      <div className="flex min-h-64 items-center justify-center gap-3">
+        <div
+          className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-400 border-t-transparent"
+          role="status"
+          aria-label="Loading"
+        />
+        <span className="text-sm text-slate-400">
+          Loading tracking information...
+        </span>
+      </div>
+    )
   }
 
-  useEffect(() => { loadData() }, [])
-
-  useEffect(() => {
-    if (!socket) return
-    socket.on('emergency_updated', e => setEmergencies(prev => prev.map(x => x._id === e._id ? e : x)))
-    socket.on('ambulance_location', ({ id, coordinates }) => {
-      setAmbulances(prev => prev.map(a => a._id === id ? { ...a, location: { coordinates } } : a))
-    })
-    return () => { socket.off('emergency_updated'); socket.off('ambulance_location') }
-  }, [socket])
-
-  const active = emergencies.filter(e => ['dispatched', 'en_route', 'arrived'].includes(e.status))
-
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-black text-white">Live Tracking</h1>
-          <p className="text-slate-400 text-sm mt-1">{active.length} active missions</p>
+          <h1 className="text-2xl font-black text-white">
+            Live Tracking
+          </h1>
+
+          <p className="mt-1 text-sm text-slate-400">
+            Monitor emergency locations and ambulance positions.
+          </p>
+
+          {lastUpdated && (
+            <p className="mt-2 text-xs text-slate-500">
+              <FiClock className="mr-1 inline" />
+              Last refreshed: {lastUpdated.toLocaleTimeString()}
+            </p>
+          )}
         </div>
-        <button onClick={loadData} disabled={loading}
-          className="flex items-center gap-2 glass-light rounded-xl px-4 py-2 text-sm text-slate-400 hover:text-cyan-400 transition-colors">
-          <FiRefreshCw className={loading ? 'animate-spin' : ''} /> Refresh
+
+        <button
+          type="button"
+          onClick={() => loadTrackingData(false)}
+          disabled={refreshing}
+          className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-3 text-sm text-white transition hover:border-cyan-400 disabled:opacity-50"
+        >
+          <FiRefreshCw className={refreshing ? 'animate-spin' : ''} />
+          Refresh
         </button>
       </div>
 
-      {/* Map mockup */}
-      <div className="glass rounded-2xl overflow-hidden mb-6 glow-cyan">
-        <div className="flex items-center justify-between px-6 py-3 border-b border-slate-700/50">
-          <span className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-            <FiMapPin className="text-cyan-400" /> Live City Map
-          </span>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
-            <span className="text-xs text-red-400 font-semibold">LIVE</span>
-          </div>
-        </div>
-        <div className="bg-[#060e1e] relative">
-          <svg width="100%" viewBox="0 0 800 400" className="w-full">
-            <defs>
-              <pattern id="tgrid" width="30" height="30" patternUnits="userSpaceOnUse">
-                <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(34,211,238,0.05)" strokeWidth="0.5" />
-              </pattern>
-              <filter id="tglow"><feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
-            </defs>
-            <rect width="800" height="400" fill="url(#tgrid)" />
-            {[[20,20,120,60],[160,20,100,60],[280,20,140,60],[440,20,100,60],[560,20,120,60],[700,20,80,60],
-              [20,100,80,70],[120,100,100,70],[240,100,140,70],[400,100,120,70],[540,100,100,70],[660,100,120,70],
-              [20,200,100,70],[140,200,120,70],[280,200,100,70],[400,200,140,70],[560,200,100,70],[680,200,100,70],
-              [20,300,120,80],[160,300,100,80],[280,300,140,80],[440,300,100,80],[560,300,120,80],[700,300,80,80]].map(([x,y,w,h],i) => (
-              <rect key={i} x={x} y={y} width={w} height={h} fill="rgba(15,23,42,0.9)" stroke="rgba(51,65,85,0.4)" strokeWidth="0.5" rx="3" />
-            ))}
-            {[[0,90,800,90],[0,190,800,190],[0,290,800,290],[110,0,110,400],[250,0,250,400],[390,0,390,400],[540,0,540,400],[660,0,660,400]].map(([x1,y1,x2,y2],i) => (
-              <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(71,85,105,0.4)" strokeWidth="1" />
-            ))}
-            {active.slice(0, 4).map((e, i) => {
-              const cx = [200, 450, 300, 600][i] || 200
-              const cy = [150, 250, 320, 150][i] || 150
-              return (
-                <g key={e._id}>
-                  <motion.circle cx={cx} cy={cy} r="20" fill="none" stroke="#EF4444" strokeWidth="1"
-                    animate={{ r: [14, 26], opacity: [0.6, 0] }} transition={{ duration: 2, repeat: Infinity, delay: i * 0.5 }} />
-                  <circle cx={cx} cy={cy} r="7" fill="#EF4444" filter="url(#tglow)" />
-                  <text x={cx + 10} y={cy + 4} fontSize="9" fill="#EF4444" fontWeight="bold">SOS</text>
-                </g>
-              )
-            })}
-            {ambulances.filter(a => a.status !== 'available').slice(0, 3).map((a, i) => {
-              const cx = [180, 420, 280][i] || 180
-              const cy = [130, 230, 300][i] || 130
-              return (
-                <g key={a._id}>
-                  <motion.rect x={cx - 10} y={cy - 7} width="20" height="14" rx="3" fill="#22D3EE"
-                    animate={{ x: [cx - 10, cx + 20, cx - 10] }} transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut', delay: i }} />
-                  <text x={cx - 4} y={cy + 4} fontSize="8" fill="white" fontWeight="bold">+</text>
-                </g>
-              )
-            })}
-          </svg>
-          <div className="absolute bottom-3 left-3 flex gap-4">
-            {[{ c: 'bg-red-500', l: 'SOS' }, { c: 'bg-cyan-400', l: 'Ambulance' }, { c: 'bg-green-400', l: 'Hospital' }].map(l => (
-              <div key={l.l} className="flex items-center gap-1.5">
-                <div className={`w-2.5 h-2.5 rounded-full ${l.c}`} />
-                <span className="text-xs text-slate-400">{l.l}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <SummaryCard
+          label="Total Emergencies"
+          value={emergencies.length}
+          icon={<FiAlertTriangle />}
+        />
+
+        <SummaryCard
+          label="Active Emergencies"
+          value={activeEmergencies.length}
+          icon={<FiActivity />}
+        />
+
+        <SummaryCard
+          label="Registered Ambulances"
+          value={ambulances.length}
+          icon={<FiTruck />}
+        />
+
+        <SummaryCard
+          label="Ambulances With Coordinates"
+          value={locatedAmbulances.length}
+          icon={<FiMapPin />}
+        />
       </div>
 
-      {/* Active missions list */}
-      <div className="glass rounded-2xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-700/50">
-          <h3 className="text-white font-bold">Active Missions</h3>
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">
+              Location Overview
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Open individual locations in Google Maps.
+            </p>
+          </div>
+
+          <span className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-300">
+            {locatedEmergencies.length} emergency locations ·{' '}
+            {locatedAmbulances.length} ambulance locations
+          </span>
         </div>
-        {active.length === 0
-          ? <div className="p-8 text-center text-slate-500">No active missions.</div>
-          : <div className="divide-y divide-slate-700/30">
-            {active.map(e => (
-              <div key={e._id} className="px-6 py-4 flex items-center justify-between hover:bg-slate-700/10 transition-colors">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-white font-semibold text-sm capitalize">{e.type?.replace('_', ' ')}</span>
-                    <SeverityBadge severity={e.severity} />
+
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+            <FiMapPin className="mb-2 text-xl text-red-400" />
+            <p className="font-semibold text-white">Emergency locations</p>
+            <p className="mt-1 text-sm text-slate-400">
+              {locatedEmergencies.length} of {emergencies.length} requests
+              have valid coordinates.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+            <FiTruck className="mb-2 text-xl text-cyan-400" />
+            <p className="font-semibold text-white">Ambulance locations</p>
+            <p className="mt-1 text-sm text-slate-400">
+              {locatedAmbulances.length} of {ambulances.length} ambulances
+              have valid coordinates.
+            </p>
+          </div>
+        </div>
+
+        {ambulances.some(ambulance => {
+          const coordinates = getCoordinates(ambulance.location)
+          return (
+            coordinates?.longitude === 0 &&
+            coordinates?.latitude === 0
+          )
+        }) && (
+          <p className="mt-4 rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-3 text-sm text-yellow-400">
+            Some ambulances have default coordinates (0, 0). Update their
+            locations before relying on tracking.
+          </p>
+        )}
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-xl font-bold text-white">
+            Emergency Locations
+          </h2>
+
+          <select
+            value={filter}
+            onChange={event => setFilter(event.target.value)}
+            className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+            aria-label="Filter emergencies"
+          >
+            <option value="all">All Emergencies</option>
+            <option value="active">Active Only</option>
+            <option value="resolved">Resolved</option>
+          </select>
+        </div>
+
+        {filteredEmergencies.length === 0 ? (
+          <EmptyState message="No emergencies found for this filter." />
+        ) : (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {filteredEmergencies.map(emergency => {
+              const coordinates = getCoordinates(emergency.location)
+              const url = mapsUrl(emergency.location)
+
+              return (
+                <motion.article
+                  key={emergency._id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-bold capitalize text-white">
+                        {(emergency.type || 'other').replaceAll('_', ' ')}
+                      </h3>
+
+                      <p className="mt-1 text-xs text-slate-500">
+                        {emergency.citizen?.name || 'Citizen'}
+                      </p>
+                    </div>
+
+                    <span
+                      className={`text-xs font-bold capitalize ${statusClass(
+                        emergency.status
+                      )}`}
+                    >
+                      {(emergency.status || 'pending').replaceAll('_', ' ')}
+                    </span>
                   </div>
-                  <div className="text-slate-500 text-xs">{e.location?.address}</div>
-                  {e.assignedAmbulance && <div className="text-cyan-400 text-xs mt-0.5">Unit: {e.assignedAmbulance.vehicleNumber}</div>}
-                </div>
-                <StatusBadge status={e.status} />
-              </div>
-            ))}
-          </div>}
+
+                  <div className="mt-4 space-y-2 text-sm text-slate-300">
+                    <p>
+                      <span className="text-slate-500">Severity:</span>{' '}
+                      {emergency.severity || 'high'}
+                    </p>
+
+                    <p>
+                      <span className="text-slate-500">Address:</span>{' '}
+                      {emergency.location?.address || 'Not provided'}
+                    </p>
+
+                    <p>
+                      <span className="text-slate-500">Ambulance:</span>{' '}
+                      {emergency.assignedAmbulance?.vehicleNumber ||
+                        'Not assigned'}
+                    </p>
+
+                    <p>
+                      <span className="text-slate-500">Driver:</span>{' '}
+                      {emergency.assignedDriver?.name || 'Not assigned'}
+                    </p>
+
+                    {coordinates && (
+                      <p className="break-words text-xs text-slate-500">
+                        Coordinates: {coordinates.latitude.toFixed(6)},{' '}
+                        {coordinates.longitude.toFixed(6)}
+                      </p>
+                    )}
+
+                    <p className="text-xs text-slate-500">
+                      Created: {formatTime(emergency.createdAt)}
+                    </p>
+                  </div>
+
+                  {url ? (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-4 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-cyan-400 transition hover:border-cyan-400"
+                    >
+                      <FiMapPin />
+                      Open Emergency Location
+                      <FiExternalLink />
+                    </a>
+                  ) : (
+                    <p className="mt-4 text-xs text-yellow-400">
+                      Location coordinates unavailable.
+                    </p>
+                  )}
+                </motion.article>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-bold text-white">
+          Ambulance Locations
+        </h2>
+
+        {ambulances.length === 0 ? (
+          <EmptyState message="No ambulances registered yet." />
+        ) : (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {ambulances.map(ambulance => {
+              const coordinates = getCoordinates(ambulance.location)
+              const url = mapsUrl(ambulance.location)
+
+              return (
+                <article
+                  key={ambulance._id}
+                  className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="rounded-xl bg-cyan-500/10 p-3 text-xl text-cyan-400">
+                        <FiTruck />
+                      </div>
+
+                      <div>
+                        <h3 className="font-bold text-white">
+                          {ambulance.vehicleNumber}
+                        </h3>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Driver: {ambulance.driver?.name || 'Not assigned'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`text-xs font-bold capitalize ${statusClass(
+                        ambulance.status
+                      )}`}
+                    >
+                      {(ambulance.status || 'unknown').replaceAll('_', ' ')}
+                    </span>
+                  </div>
+
+                  {coordinates ? (
+                    <div className="mt-4">
+                      <p className="text-sm text-slate-400">
+                        Coordinates: {coordinates.latitude.toFixed(6)},{' '}
+                        {coordinates.longitude.toFixed(6)}
+                      </p>
+
+                      {coordinates.longitude === 0 &&
+                        coordinates.latitude === 0 && (
+                          <p className="mt-2 text-xs text-yellow-400">
+                            These are default coordinates, not a verified
+                            real-world position.
+                          </p>
+                        )}
+
+                      {url && (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-3 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-cyan-400 hover:border-cyan-400"
+                        >
+                          <FiMapPin />
+                          Open Ambulance Location
+                          <FiExternalLink />
+                        </a>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="mt-4 text-sm text-yellow-400">
+                      Ambulance location is not available.
+                    </p>
+                  )}
+                </article>
+              )
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function SummaryCard({ label, value, icon }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-slate-400">{label}</p>
+        <span className="text-xl text-cyan-400">{icon}</span>
       </div>
+      <p className="mt-3 text-3xl font-black text-white">{value}</p>
+    </div>
+  )
+}
+
+function EmptyState({ message }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-8 text-center">
+      <FiMapPin className="mx-auto mb-3 text-3xl text-slate-500" />
+      <p className="text-sm text-slate-400">{message}</p>
     </div>
   )
 }
