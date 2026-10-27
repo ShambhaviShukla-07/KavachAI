@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { FiBell, FiMenu, FiSearch } from 'react-icons/fi'
 import { RiShieldFlashFill } from 'react-icons/ri'
 import { useAuth } from '../../context/AuthContext'
@@ -12,6 +13,7 @@ const roleBadge = {
 
 export default function Header({ onMenuClick }) {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const rb = roleBadge[user?.role] || { label: user?.role, color: 'bg-slate-400/20 text-slate-400' }
 
@@ -50,15 +52,28 @@ export default function Header({ onMenuClick }) {
         </button>
 
         {/* Avatar */}
-        <div className="flex items-center gap-2">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-indigo-500 flex items-center justify-center text-xs font-black text-white glow-cyan-sm">
-            {user?.name?.charAt(0).toUpperCase()}
-          </div>
-          <div className="hidden md:block">
-            <div className="text-white text-sm font-semibold leading-none">{user?.name}</div>
-            <div className="text-slate-500 text-xs mt-0.5">{user?.email}</div>
-          </div>
-        </div>
+        {/* Avatar / Profile */}
+<button
+  type="button"
+  onClick={() => {
+    navigate('/profile')
+  }}
+  className="flex items-center gap-2 rounded-xl p-1 text-left hover:bg-white/5 transition-colors"
+  title="Open Profile"
+>
+  <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-indigo-500 flex items-center justify-center text-xs font-black text-white glow-cyan-sm">
+    {user?.name?.charAt(0)?.toUpperCase() || 'U'}
+  </div>
+
+  <div className="hidden md:block">
+    <div className="text-white text-sm font-semibold leading-none">
+      {user?.name || 'User'}
+    </div>
+    <div className="text-slate-500 text-xs mt-0.5">
+      {user?.email || ''}
+    </div>
+  </div>
+</button>
       </div>
     </header>
   )

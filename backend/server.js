@@ -1,4 +1,5 @@
 require('dotenv').config()
+console.log('Mongo URI loaded:', !!process.env.MONGO_URI)
 const express = require('express')
 const http = require('http')
 const cors = require('cors')

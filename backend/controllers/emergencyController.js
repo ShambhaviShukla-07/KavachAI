@@ -1,43 +1,87 @@
+
 const Emergency = require('../models/Emergency')
 const Ambulance = require('../models/Ambulance')
-const Notification = require('../models/Notification')
 const ApiError = require('../utils/ApiError')
 const ApiResponse = require('../utils/ApiResponse')
 const asyncHandler = require('../utils/asyncHandler')
+const Notification = require('../models/Notification')
+const { getIO } = require('../config/socket')
 
-// POST /api/emergency — citizen creates emergency
+const VALID_STATUSES = [
+  'pending',
+  'dispatched',
+  'en_route',
+  'arrived',
+  'resolved',
+  'cancelled'
+]
+
+const emitEmergencyUpdate = (event, data) => {
+  try {
+    const { getIO } = require('../config/socket')
+    getIO().emit(event, data)
+  } catch (error) {
+    // Socket connection may not be initialized.
+  }
+}
+
+// POST /api/emergency
 const createEmergency = asyncHandler(async (req, res) => {
   const { type, severity, description, coordinates, address } = req.body
-  if (!coordinates) throw new ApiError(400, 'Location coordinates required')
+
+  if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+    throw new ApiError(400, 'Valid location coordinates required')
+  }
+
+  const [longitude, latitude] = coordinates
+
+  if (
+    !Number.isFinite(longitude) ||
+    !Number.isFinite(latitude) ||
+    longitude < -180 ||
+    longitude > 180 ||
+    latitude < -90 ||
+    latitude > 90
+  ) {
+    throw new ApiError(400, 'Invalid longitude or latitude')
+  }
 
   const emergency = await Emergency.create({
     citizen: req.user._id,
     type,
     severity: severity || 'high',
-    description,
-    location: { type: 'Point', coordinates, address }
+    description: description || '',
+    location: {
+      type: 'Point',
+      coordinates: [longitude, latitude],
+      address: address || ''
+    }
   })
 
-  // Notify all dispatchers via socket
-  try {
-    const { getIO } = require('../config/socket')
-    getIO().emit('new_emergency', emergency)
-  } catch (e) {}
+  emitEmergencyUpdate('new_emergency', emergency)
 
-  res.status(201).json(new ApiResponse(201, emergency, 'Emergency created'))
+  res.status(201).json(
+    new ApiResponse(201, emergency, 'Emergency request created')
+  )
 })
 
-// GET /api/emergency — get all (dispatcher/admin) or own (citizen)
+// GET /api/emergency
 const getEmergencies = asyncHandler(async (req, res) => {
-  let query = {}
-  if (req.user.role === 'citizen') query.citizen = req.user._id
-  if (req.user.role === 'driver') query.assignedDriver = req.user._id
+  const query = {}
+
+  if (req.user.role === 'citizen') {
+    query.citizen = req.user._id
+  } else if (req.user.role === 'driver') {
+    query.assignedDriver = req.user._id
+  } else if (!['dispatcher', 'admin'].includes(req.user.role)) {
+    throw new ApiError(403, 'Not authorized to view these emergencies')
+  }
 
   const emergencies = await Emergency.find(query)
     .populate('citizen', 'name phone')
-    .populate('assignedAmbulance', 'vehicleNumber')
+    .populate('assignedAmbulance', 'vehicleNumber status')
     .populate('assignedDriver', 'name phone')
-    .populate('assignedHospital', 'name address')
+    .populate('assignedHospital', 'name address phone')
     .sort({ createdAt: -1 })
 
   res.json(new ApiResponse(200, emergencies))
@@ -51,76 +95,217 @@ const getEmergencyById = asyncHandler(async (req, res) => {
     .populate('assignedDriver', 'name phone')
     .populate('assignedHospital', 'name address phone')
 
-  if (!emergency) throw new ApiError(404, 'Emergency not found')
+  if (!emergency) {
+    throw new ApiError(404, 'Emergency not found')
+  }
+
+  const isDispatcher = ['dispatcher', 'admin'].includes(req.user.role)
+  const isCitizen =
+    req.user.role === 'citizen' &&
+    String(emergency.citizen?._id || emergency.citizen) === String(req.user._id)
+  const isDriver =
+    req.user.role === 'driver' &&
+    String(emergency.assignedDriver?._id || emergency.assignedDriver) ===
+      String(req.user._id)
+
+  if (!isDispatcher && !isCitizen && !isDriver) {
+    throw new ApiError(403, 'Not authorized to view this emergency')
+  }
+
   res.json(new ApiResponse(200, emergency))
 })
 
-// PUT /api/emergency/:id/dispatch — dispatcher assigns ambulance
+// PUT /api/emergency/:id/dispatch
 const dispatchEmergency = asyncHandler(async (req, res) => {
   const { ambulanceId, hospitalId, driverId } = req.body
 
+  if (!ambulanceId) {
+    throw new ApiError(400, 'Please select an ambulance')
+  }
+
   const emergency = await Emergency.findById(req.params.id)
-  if (!emergency) throw new ApiError(404, 'Emergency not found')
+
+  if (!emergency) {
+    throw new ApiError(404, 'Emergency not found')
+  }
+
+  if (['resolved', 'cancelled'].includes(emergency.status)) {
+    throw new ApiError(400, 'This emergency is already closed')
+  }
+
+  const ambulance = await Ambulance.findById(ambulanceId)
+
+  if (!ambulance) {
+    throw new ApiError(404, 'Ambulance not found')
+  }
+
+  if (
+    ambulance.status !== 'available' &&
+    String(ambulance.currentEmergency || '') !== String(emergency._id)
+  ) {
+    throw new ApiError(400, 'Selected ambulance is not available')
+  }
+
+  if (driverId && ambulance.driver &&
+      String(ambulance.driver) !== String(driverId)) {
+    throw new ApiError(
+      400,
+      'Selected driver does not match the ambulance assigned driver'
+    )
+  }
 
   emergency.status = 'dispatched'
-  emergency.assignedAmbulance = ambulanceId || null
-  emergency.assignedDriver = driverId || null
+  emergency.assignedAmbulance = ambulance._id
+  emergency.assignedDriver = driverId || ambulance.driver || null
   emergency.assignedHospital = hospitalId || null
   emergency.dispatcher = req.user._id
+
   await emergency.save()
 
-  if (ambulanceId) {
-    await Ambulance.findByIdAndUpdate(ambulanceId, {
-      status: 'dispatched',
-      currentEmergency: emergency._id
-    })
-  }
+  ambulance.status = 'dispatched'
+  ambulance.currentEmergency = emergency._id
+  await ambulance.save()
 
-  try {
-    const { getIO } = require('../config/socket')
-    getIO().emit('emergency_updated', emergency)
-  } catch (e) {}
+  const updated = await Emergency.findById(emergency._id)
+    .populate('citizen', 'name phone')
+    .populate('assignedAmbulance', 'vehicleNumber status')
+    .populate('assignedDriver', 'name phone')
+    .populate('assignedHospital', 'name address phone')
 
-  res.json(new ApiResponse(200, emergency, 'Emergency dispatched'))
+  emitEmergencyUpdate('emergency_updated', updated)
+
+  res.json(new ApiResponse(200, updated, 'Ambulance dispatched successfully'))
 })
 
-// PUT /api/emergency/:id/status — update status
+// PUT /api/emergency/:id/status
 const updateStatus = asyncHandler(async (req, res) => {
   const { status } = req.body
-  const emergency = await Emergency.findByIdAndUpdate(
-    req.params.id,
-    { status, ...(status === 'resolved' ? { resolvedAt: new Date() } : {}) },
-    { new: true }
-  )
-  if (!emergency) throw new ApiError(404, 'Emergency not found')
 
-  if (status === 'resolved' && emergency.assignedAmbulance) {
-    await Ambulance.findByIdAndUpdate(emergency.assignedAmbulance, {
-      status: 'available',
-      currentEmergency: null
-    })
+  if (!VALID_STATUSES.includes(status)) {
+    throw new ApiError(400, 'Invalid emergency status')
   }
 
-  try {
-    const { getIO } = require('../config/socket')
-    getIO().emit('emergency_updated', emergency)
-  } catch (e) {}
+  const emergency = await Emergency.findById(req.params.id)
 
-  res.json(new ApiResponse(200, emergency, 'Status updated'))
+  if (!emergency) {
+    throw new ApiError(404, 'Emergency not found')
+  }
+
+  const isDispatcher = ['dispatcher', 'admin'].includes(req.user.role)
+  const isAssignedDriver =
+    req.user.role === 'driver' &&
+    String(emergency.assignedDriver || '') === String(req.user._id)
+
+  if (!isDispatcher && !isAssignedDriver) {
+    throw new ApiError(403, 'Not authorized to update this emergency')
+  }
+
+  if (['resolved', 'cancelled'].includes(emergency.status)) {
+    throw new ApiError(400, 'This emergency is already closed')
+  }
+
+  const allowedTransitions = {
+    pending: ['dispatched', 'cancelled'],
+    dispatched: ['en_route', 'arrived', 'resolved', 'cancelled'],
+    en_route: ['arrived', 'resolved', 'cancelled'],
+    arrived: ['resolved', 'cancelled']
+  }
+
+  if (!allowedTransitions[emergency.status]?.includes(status)) {
+    throw new ApiError(
+      400,
+      `Cannot change status from ${emergency.status} to ${status}`
+    )
+  }
+
+  // Drivers can only update the progress of their assigned emergency.
+  if (!isDispatcher && !['en_route', 'arrived', 'resolved'].includes(status)) {
+    throw new ApiError(403, 'Drivers cannot perform this status update')
+  }
+
+  emergency.status = status
+
+  if (status === 'resolved') {
+    emergency.resolvedAt = new Date()
+  }
+
+  await emergency.save()
+
+  if (emergency.assignedAmbulance) {
+    const ambulance = await Ambulance.findById(emergency.assignedAmbulance)
+
+    if (ambulance) {
+      if (status === 'resolved' || status === 'cancelled') {
+        ambulance.status = 'available'
+        ambulance.currentEmergency = null
+        ambulance.totalTrips = (ambulance.totalTrips || 0) + 1
+      } else if (status === 'en_route') {
+        ambulance.status = 'en_route'
+      } else if (status === 'arrived') {
+        ambulance.status = 'at_scene'
+      }
+
+      await ambulance.save()
+    }
+  }
+  // Create notification for the citizen
+try {
+const Notification = require('../models/Notification')
+const { getIO } = require('../config/socket')
+
+const notification = await Notification.create({
+  user: emergency.citizen,
+  title: 'Ambulance Assigned 🚑',
+  message: 'An ambulance has been assigned to your emergency request.',
+  type: 'dispatch',
+  link: '/citizen/dashboard'
 })
 
-// GET /api/emergency/stats — analytics
-const getStats = asyncHandler(async (req, res) => {
-  const total = await Emergency.countDocuments()
-  const pending = await Emergency.countDocuments({ status: 'pending' })
-  const resolved = await Emergency.countDocuments({ status: 'resolved' })
-  const active = await Emergency.countDocuments({ status: { $in: ['dispatched', 'en_route', 'arrived'] } })
+getIO()
+  .to(`user_${emergency.citizen}`)
+  .emit('new_notification', notification)
 
-  const byType = await Emergency.aggregate([
-    { $group: { _id: '$type', count: { $sum: 1 } } }
+} catch (error) {
+console.error('Notification creation failed:', error.message)
+}
+
+
+  const updated = await Emergency.findById(emergency._id)
+    .populate('citizen', 'name phone')
+    .populate('assignedAmbulance', 'vehicleNumber status')
+    .populate('assignedDriver', 'name phone')
+    .populate('assignedHospital', 'name address phone')
+
+  emitEmergencyUpdate('emergency_updated', updated)
+
+  res.json(new ApiResponse(200, updated, 'Emergency status updated'))
+})
+
+// GET /api/emergency/stats
+const getStats = asyncHandler(async (req, res) => {
+  const [total, pending, resolved, active, byType] = await Promise.all([
+    Emergency.countDocuments(),
+    Emergency.countDocuments({ status: 'pending' }),
+    Emergency.countDocuments({ status: 'resolved' }),
+    Emergency.countDocuments({
+      status: { $in: ['dispatched', 'en_route', 'arrived'] }
+    }),
+    Emergency.aggregate([
+      { $group: { _id: '$type', count: { $sum: 1 } } }
+    ])
   ])
 
-  res.json(new ApiResponse(200, { total, pending, resolved, active, byType }))
+  res.json(
+    new ApiResponse(200, { total, pending, resolved, active, byType })
+  )
 })
 
-module.exports = { createEmergency, getEmergencies, getEmergencyById, dispatchEmergency, updateStatus, getStats }
+module.exports = {
+  createEmergency,
+  getEmergencies,
+  getEmergencyById,
+  dispatchEmergency,
+  updateStatus,
+  getStats
+}
+
